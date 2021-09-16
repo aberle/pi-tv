@@ -1,14 +1,21 @@
 #!/usr/bin/env python3
 
 import RPi.GPIO as gpio
+from evdev import InputDevice, KeyEvent, ecodes
+
 import os
+import sys
+import time
 import random
-from subprocess import Popen
 import threading
+from subprocess import Popen
 
 VALID_VIDEO_TYPES = ['.mp4', '.mkv']
 DATA_DIR = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'data')
 BUTTON_GPIO = 26
+TOUCHSCREEN_DEVICE_PATH = '/dev/input/event0'
+DOUBLE_CLICK_THRESHOLD_SEC = 0.20
+LONG_PRESS_THRESHOLD_SEC = 2.0
 
 
 class ButtonHandler(threading.Thread):
@@ -73,9 +80,14 @@ def button_callback(channel):
 
 
 def configure_button_callback():
-    button_callback(BUTTON_GPIO)  # Set initial screen on/off state
     handler = ButtonHandler(BUTTON_GPIO, button_callback, edge='both', bouncetime=100)
-    gpio.add_event_detect(BUTTON_GPIO, gpio.BOTH, callback=handler)
+    try:
+        gpio.add_event_detect(BUTTON_GPIO, gpio.BOTH, callback=handler)
+    except RuntimeError:
+        print("Failed to add edge detection, try running the script as root.")
+        sys.exit(-1)
+
+    button_callback(BUTTON_GPIO)  # Set initial screen on/off state
 
 
 def get_videos(directory):
@@ -104,6 +116,31 @@ def video_loop():
         play_videos(videos)
 
 
+def touchscreen_loop():
+    dev = InputDevice(TOUCHSCREEN_DEVICE_PATH)
+
+    last_event_time = {
+        KeyEvent.key_up: time.time(),
+        KeyEvent.key_down: time.time()
+    }
+
+    new_event_time = dict(last_event_time)
+
+    for event in dev.read_loop():
+        if event.type == ecodes.EV_KEY:
+            new_event_time[event.value] = time.time()
+
+            if event.value == KeyEvent.key_up:
+                key_up_diff = new_event_time[event.value] - last_event_time[event.value]
+                key_down_diff = new_event_time[event.value] - last_event_time[KeyEvent.key_down]
+                if key_up_diff < DOUBLE_CLICK_THRESHOLD_SEC:
+                    print("Double click!")
+                elif key_down_diff > LONG_PRESS_THRESHOLD_SEC:
+                    print("Long press!")
+
+            last_event_time[event.value] = new_event_time[event.value]
+
+
 def main():
     # Initialize GPIOs to allow turning the screen on/off and detecting button presses
     os.system('raspi-gpio set 19 ip')
@@ -119,8 +156,13 @@ def main():
     player_thread = threading.Thread(target=video_loop, daemon=True)
     player_thread.start()
 
+    # And the touchscreen event thread
+    touchscreen_thread = threading.Thread(target=touchscreen_loop, daemon=True)
+    touchscreen_thread.start()
+
     # Run forever
     player_thread.join()
+    touchscreen_thread.join()
 
 
 if __name__ == '__main__':
