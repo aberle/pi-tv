@@ -7,7 +7,11 @@ import os
 import sys
 import time
 import random
+import psutil
+import signal
 import threading
+from enum import Enum
+from queue import Queue, Empty
 from subprocess import Popen
 
 VALID_VIDEO_TYPES = ['.mp4', '.mkv']
@@ -16,6 +20,11 @@ BUTTON_GPIO = 26
 TOUCHSCREEN_DEVICE_PATH = '/dev/input/event0'
 DOUBLE_CLICK_THRESHOLD_SEC = 0.20
 LONG_PRESS_THRESHOLD_SEC = 2.0
+
+
+class TouchScreenCommand(Enum):
+    SKIP = 1
+    CHANGE_SHOW = 2
 
 
 class ButtonHandler(threading.Thread):
@@ -99,24 +108,71 @@ def get_videos(directory):
     return videos
 
 
-def play_videos(videos):
+def kill_child_processes(parent_pid, sig=signal.SIGTERM):
+    try:
+        parent = psutil.Process(parent_pid)
+    except psutil.NoSuchProcess:
+        print("No such process %d" % parent_pid)
+        return
+    children = parent.children(recursive=True)
+    for process in children:
+        print("Killing process %d" % process.pid)
+        process.send_signal(sig)
+
+
+def play_videos(videos, command_queue):
     random.shuffle(videos)
     for video in videos:
         print("Playing video %s" % video)
-        playProcess = Popen(['omxplayer', '--no-osd', '--aspect-mode', 'fill', video])
-        playProcess.wait()
+        play_process = Popen(['omxplayer', '--no-osd', '--aspect-mode', 'fill', video])
+        while True:
+            try:
+                command = command_queue.get(timeout=1)
+            except Empty:
+                continue
+
+            print("Received a %s" % command)
+            # Regardless if we're skipping the current video or changing shows,
+            # the play_process needs to be killed. omxplayer does its real
+            # work in a child process it spawns, so it needs to be killed as well
+            kill_child_processes(play_process.pid)
+            play_process.kill()
+
+            if command == TouchScreenCommand.SKIP:
+                # Play the next video in the videos list
+                break
+            elif command == TouchScreenCommand.CHANGE_SHOW:
+                # Return to video_loop() and select a new show to play
+                return
+
+        play_process.wait()
 
 
-def video_loop():
-    shows = os.listdir(DATA_DIR)
-    random.shuffle(shows)
-    print("Playing show... %s!" % shows[0])
-    videos = get_videos(os.path.join(DATA_DIR, shows[0]))
+def video_loop(command_queue, show_to_start_with=None):
+    last_show_played = None
     while (True):
-        play_videos(videos)
+        shows = os.listdir(DATA_DIR)
+        if show_to_start_with:
+            if show_to_start_with not in shows:
+                print("Show %s was requested to start playing," % show_to_start_with,
+                      "but is not one of the available shows: %s" % shows)
+                sys.exit(-1)
+            else:
+                show_to_play = last_show_played = show_to_start_with
+                show_to_start_with = None
+        else:
+            candidate_shows = list(shows)
+            if last_show_played:
+                candidate_shows.remove(last_show_played)
+            random.shuffle(candidate_shows)
+            show_to_play = candidate_shows[0]
+        print("Playing show... %s!" % show_to_play)
+        videos = get_videos(os.path.join(DATA_DIR, show_to_play))
+        last_show_played = show_to_play
+        play_videos(videos, command_queue)
 
 
-def touchscreen_loop():
+def touchscreen_loop(command_queue):
     dev = InputDevice(TOUCHSCREEN_DEVICE_PATH)
 
     last_event_time = {
@@ -133,10 +189,13 @@ def touchscreen_loop():
             if event.value == KeyEvent.key_up:
                 key_up_diff = new_event_time[event.value] - last_event_time[event.value]
                 key_down_diff = new_event_time[event.value] - last_event_time[KeyEvent.key_down]
+
+                # If the user double-clicked, skip the episode.
+                # If the user long-pressed the screen, change the show.
                 if key_up_diff < DOUBLE_CLICK_THRESHOLD_SEC:
-                    print("Double click!")
+                    command_queue.put(TouchScreenCommand.SKIP)
                 elif key_down_diff > LONG_PRESS_THRESHOLD_SEC:
-                    print("Long press!")
+                    command_queue.put(TouchScreenCommand.CHANGE_SHOW)
 
             last_event_time[event.value] = new_event_time[event.value]
 
@@ -152,17 +211,25 @@ def main():
     # Configure the button callback (which starts its own thread)
     configure_button_callback()
 
-    # Kick off the video player thread
-    player_thread = threading.Thread(target=video_loop, daemon=True)
+    # Queue to be used for the touchscreen thread to send events to the player thread
+    command_queue = Queue()
+
+    # Kick off the video player thread with the desired show (if specified)
+    if len(sys.argv) == 2:
+        show_to_start_with = sys.argv[1]
+    else:
+        show_to_start_with = None
+    player_thread = threading.Thread(target=video_loop, args=(command_queue, show_to_start_with), daemon=True)
     player_thread.start()
 
     # And the touchscreen event thread
-    touchscreen_thread = threading.Thread(target=touchscreen_loop, daemon=True)
+    touchscreen_thread = threading.Thread(target=touchscreen_loop, args=(command_queue,), daemon=True)
     touchscreen_thread.start()
 
-    # Run forever
+    # Run forever. Purposefully not .join()ing the touchscreen thread, so if there is an
+    # error in the player thread, the application will exit and get restarted by systemd
+    # TODO: make this better with a should_keep_running() function instead
     player_thread.join()
-    touchscreen_thread.join()
 
 
 if __name__ == '__main__':

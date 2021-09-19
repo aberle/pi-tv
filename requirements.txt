@@ -1,2 +1,3 @@
 evdev==1.4.0
+psutil==5.8.0
 RPi.GPIO==0.6.5
