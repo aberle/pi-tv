@@ -1,0 +1,11 @@
+[Unit]
+Description=tv
+After=network.target
+
+[Service]
+WorkingDirectory=/home/sysop/tv/
+ExecStart=/home/sysop/tv/tv_service.py
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
