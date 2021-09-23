@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
 
-import RPi.GPIO as gpio
-from evdev import InputDevice, KeyEvent, ecodes
-
 import os
-import sys
-import time
-import random
 import psutil
+import random
 import signal
+import sys
 import threading
+import time
 from enum import Enum
 from queue import Queue, Empty
 from subprocess import Popen
+
+import RPi.GPIO as gpio
+from evdev import InputDevice, KeyEvent, ecodes
+
 
 VALID_VIDEO_TYPES = ['.mp4', '.mkv']
 DATA_DIR = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'data')
