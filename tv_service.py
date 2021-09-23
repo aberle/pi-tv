@@ -228,7 +228,8 @@ def main():
     tv_static_proc = None
     if os.path.exists(tv_static_filepath):
         tv_static_proc = Popen(['omxplayer', '--no-osd', '--loop', tv_static_filepath])
-        time.sleep(INITIAL_TV_STATIC_DURATION_SEC)  # Sleep a little bit to show the effect on startup
+        # Sleep a little bit to show off the effect on startup
+        time.sleep(INITIAL_TV_STATIC_DURATION_SEC)
 
     # Configure the button callback (which starts its own thread)
     configure_button_callback()
@@ -241,11 +242,15 @@ def main():
         show_to_start_with = sys.argv[1]
     else:
         show_to_start_with = None
-    player_thread = threading.Thread(target=video_loop, args=(command_queue, show_to_start_with, tv_static_proc), daemon=True)
+    player_thread = threading.Thread(target=video_loop,
+                                     args=(command_queue, show_to_start_with, tv_static_proc),
+                                     daemon=True)
     player_thread.start()
 
     # And the touchscreen event thread
-    touchscreen_thread = threading.Thread(target=touchscreen_loop, args=(command_queue,), daemon=True)
+    touchscreen_thread = threading.Thread(target=touchscreen_loop,
+                                          args=(command_queue,),
+                                          daemon=True)
     touchscreen_thread.start()
 
     # Run forever. Purposefully not .join()ing the touchscreen thread, so if there is an
