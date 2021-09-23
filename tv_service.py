@@ -20,6 +20,8 @@ BUTTON_GPIO = 26
 TOUCHSCREEN_DEVICE_PATH = '/dev/input/event0'
 DOUBLE_CLICK_THRESHOLD_SEC = 0.20
 LONG_PRESS_THRESHOLD_SEC = 2.0
+TV_STATIC_FILENAME = 'tv_static.mp4'
+INITIAL_TV_STATIC_DURATION_SEC = 1.5
 
 
 class TouchScreenCommand(Enum):
@@ -116,16 +118,27 @@ def kill_child_processes(parent_pid, sig=signal.SIGTERM):
         return
     children = parent.children(recursive=True)
     for process in children:
-        print("Killing process %d" % process.pid)
+        print("Sending signal %s to process %d" % (sig, process.pid))
         process.send_signal(sig)
 
 
-def play_videos(videos, command_queue):
+def resume_tv_static(tv_static_proc):
+    if tv_static_proc:
+        kill_child_processes(tv_static_proc.pid, signal.SIGCONT)
+
+
+def stop_tv_static(tv_static_proc):
+    if tv_static_proc:
+        kill_child_processes(tv_static_proc.pid, signal.SIGSTOP)
+
+
+def play_videos(videos, command_queue, tv_static_proc):
     random.shuffle(videos)
     for video in videos:
         print("Playing video %s" % video)
+        stop_tv_static(tv_static_proc)
         play_process = Popen(['omxplayer', '--no-osd', '--aspect-mode', 'fill', video])
-        while True:
+        while play_process.poll() is None:
             try:
                 command = command_queue.get(timeout=1)
             except Empty:
@@ -135,6 +148,7 @@ def play_videos(videos, command_queue):
             # Regardless if we're skipping the current video or changing shows,
             # the play_process needs to be killed. omxplayer does its real
             # work in a child process it spawns, so it needs to be killed as well
+            resume_tv_static(tv_static_proc)
             kill_child_processes(play_process.pid)
             play_process.kill()
 
@@ -148,10 +162,10 @@ def play_videos(videos, command_queue):
         play_process.wait()
 
 
-def video_loop(command_queue, show_to_start_with=None):
+def video_loop(command_queue, show_to_start_with=None, tv_static_proc=None):
     last_show_played = None
     while (True):
-        shows = os.listdir(DATA_DIR)
+        shows = [s for s in os.listdir(DATA_DIR) if os.path.isdir(os.path.join(DATA_DIR, s))]
         if show_to_start_with:
             if show_to_start_with not in shows:
                 print("Show %s was requested to start playing," % show_to_start_with,
@@ -169,7 +183,7 @@ def video_loop(command_queue, show_to_start_with=None):
         print("Playing show... %s!" % show_to_play)
         videos = get_videos(os.path.join(DATA_DIR, show_to_play))
         last_show_played = show_to_play
-        play_videos(videos, command_queue)
+        play_videos(videos, command_queue, tv_static_proc)
 
 
 def touchscreen_loop(command_queue):
@@ -208,6 +222,14 @@ def main():
     gpio.setup(BUTTON_GPIO, gpio.IN, pull_up_down=gpio.PUD_UP)
     gpio.setup(18, gpio.OUT)
 
+    # Create an omxplayer process to play TV static. We'll pause/resume this process
+    # with SIGSTOP/SIGCONT signals between videos instead of just having a blank screen
+    tv_static_filepath = os.path.join(DATA_DIR, TV_STATIC_FILENAME)
+    tv_static_proc = None
+    if os.path.exists(tv_static_filepath):
+        tv_static_proc = Popen(['omxplayer', '--no-osd', '--loop', tv_static_filepath])
+        time.sleep(INITIAL_TV_STATIC_DURATION_SEC)  # Sleep a little bit to show the effect on startup
+
     # Configure the button callback (which starts its own thread)
     configure_button_callback()
 
@@ -219,7 +241,7 @@ def main():
         show_to_start_with = sys.argv[1]
     else:
         show_to_start_with = None
-    player_thread = threading.Thread(target=video_loop, args=(command_queue, show_to_start_with), daemon=True)
+    player_thread = threading.Thread(target=video_loop, args=(command_queue, show_to_start_with, tv_static_proc), daemon=True)
     player_thread.start()
 
     # And the touchscreen event thread
@@ -228,7 +250,6 @@ def main():
 
     # Run forever. Purposefully not .join()ing the touchscreen thread, so if there is an
     # error in the player thread, the application will exit and get restarted by systemd
-    # TODO: make this better with a should_keep_running() function instead
     player_thread.join()
 
 
